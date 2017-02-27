@@ -15,3 +15,14 @@ hs_err_pid*
 .classpath
 .project
 .settings
+
+
+# Idea
+*.iml
+.idea
+
+# Eclipse
+.settings
+.classpath
+.project
+/TODO.txt
