@@ -16,14 +16,8 @@
  */
 package org.apache.activemq.transport.discovery.k8s;
 
-import java.io.IOException;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
-
+import io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClient;
 import org.apache.activemq.command.DiscoveryEvent;
 import org.apache.activemq.thread.TaskRunnerFactory;
 import org.apache.activemq.transport.discovery.DiscoveryAgent;
@@ -31,8 +25,12 @@ import org.apache.activemq.transport.discovery.DiscoveryListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.fabric8.kubernetes.client.DefaultKubernetesClient;
-import io.fabric8.kubernetes.client.KubernetesClient;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * The KubernetDiscoveryAgent can be used to build a network of brokers with
@@ -46,300 +44,358 @@ import io.fabric8.kubernetes.client.KubernetesClient;
  */
 public class KubernetesDiscoveryAgent implements DiscoveryAgent {
 
-    private final static Logger LOG = LoggerFactory.getLogger(KubernetesDiscoveryAgent.class);
+  // members
+  private static final Logger LOG = LoggerFactory.getLogger(KubernetesDiscoveryAgent.class);
 
-    private long initialReconnectDelay = 1000;
-    private long maxReconnectDelay = 1000 * 30;
-    private long backOffMultiplier = 2;
-    private boolean useExponentialBackOff=true;
-    private int maxReconnectAttempts;
-    private final Object sleepMutex = new Object();
-    private final Object k8sSleepMutex = new Object();
-    private long minConnectTime = 5000;
-    private DiscoveryListener listener;
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private TaskRunnerFactory taskRunner;
+  private long initialReconnectDelay = 1000;
+  private long maxReconnectDelay = initialReconnectDelay * 30;
+  private long backOffMultiplier = 2;
+  private boolean useExponentialBackOff = true;
+  private int maxReconnectAttempts;
+  private final Object sleepMutex = new Object();
+  private final Object k8sSleepMutex = new Object();
+  private long minConnectTime = 5000;
+  private DiscoveryListener listener;
+  private final AtomicBoolean running = new AtomicBoolean(false);
+  private TaskRunnerFactory taskRunner;
 
-    private String namespace = "default";
-    private String podLabelKey = "app";
-    private String podLabelValue = "activemq";
-    private String serviceUrlFormat = "tcp://%s:61616";
-    private long sleepDelay = TimeUnit.SECONDS.toMillis(30);
+  private String namespace = "default";
+  private String podLabelKey = "app";
+  private String podLabelValue = "activemq";
+  private String serviceUrlFormat = "tcp://%s:6162";
+  private long sleepDelay = TimeUnit.SECONDS.toMillis(30);
 
-    private final KubernetesClient client = new DefaultKubernetesClient();
-    private final Set<String> knownServices = new HashSet<>();
+  private final KubernetesClient client = new DefaultKubernetesClient();
 
-    private static class SimpleDiscoveryEvent extends DiscoveryEvent {
+  // nested types
+  private static class SimpleDiscoveryEvent extends DiscoveryEvent {
 
-        private int connectFailures;
-        private long reconnectDelay = -1;
-        private long connectTime = System.currentTimeMillis();
-        private final AtomicBoolean failed = new AtomicBoolean(false);
+    private int connectFailures;
+    private long reconnectDelay = -1;
+    private long connectTime = System.currentTimeMillis();
+    private final AtomicBoolean failed = new AtomicBoolean(false);
 
-        public SimpleDiscoveryEvent(String service) {
-            super(service);
-        }
+    public SimpleDiscoveryEvent(String service) {
 
-        public SimpleDiscoveryEvent(SimpleDiscoveryEvent copy) {
-            super(copy);
-            connectFailures = copy.connectFailures;
-            reconnectDelay = copy.reconnectDelay;
-            connectTime = copy.connectTime;
-            failed.set(copy.failed.get());
-        }
-
-        @Override
-        public String toString() {
-            return "[" + serviceName + ", failed:" + failed + ", connectionFailures:" + connectFailures + "]";
-        }
+      super(service);
     }
-    
-    private class KubernetesPodEnumerator implements Runnable {
-        @Override
-        public void run() {
-            while(running.get()) {
-                try {
-                    LOG.info("Enumerating pods with label key: {} label value: {}",
-                            podLabelKey, podLabelValue);
-                    final Set<String> availableServices = client.pods().inNamespace(namespace)
-                        .withLabel(podLabelKey, podLabelValue)
-                        .list().getItems().stream()
-                        .map(pod -> String.format(serviceUrlFormat, pod.getStatus().getPodIP()))
-                        .collect(Collectors.toSet());
 
-                    // Determine the list of service we need to add
-                    final List<String> servicesToAdd = availableServices.stream()
-                            .filter(svc -> !knownServices.contains(svc))
-                            .collect(Collectors.toList());
+    public SimpleDiscoveryEvent(SimpleDiscoveryEvent copy) {
 
-                    // Add them
-                    for (String service : servicesToAdd) {
-                        LOG.info("Adding service: {}", service);
-                        listener.onServiceAdd(new SimpleDiscoveryEvent(service));
-                        knownServices.add(service);
-                    }
+      super(copy);
+      connectFailures = copy.connectFailures;
+      reconnectDelay = copy.reconnectDelay;
+      connectTime = copy.connectTime;
+      failed.set(copy.failed.get());
+    }
 
-                    // Determine the list of services we need to remove
-                    final List<String> servicesToRemove = knownServices.stream()
-                            .filter(svc -> !availableServices.contains(svc))
-                            .collect(Collectors.toList());
+    @Override
+    public String toString() {
+      return "SimpleDiscoveryEvent{" +
+          "connectFailures=" + connectFailures +
+          ", reconnectDelay=" + reconnectDelay +
+          ", connectTime=" + connectTime +
+          ", failed=" + failed +
+          ", service=" + serviceName +
+          '}';
+    }
+  }
 
-                    // Remove them
-                    for (String service : servicesToRemove) {
-                        LOG.info("Removing service: {}", service);
-                        listener.onServiceRemove(new SimpleDiscoveryEvent(service));
-                        knownServices.remove(service);
-                    }
-                } catch (RuntimeException e) {
-                    LOG.warn("Failed to enumerate the pods. Will try again later.", e);
-                }
+  private class KubernetesPodEnumerator implements Runnable {
+    @Override
+    public void run() {
 
-                // Sleep before trying again
-                synchronized(k8sSleepMutex) {
-                    try {
-                        k8sSleepMutex.wait(sleepDelay);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
+      Set<String> knownPods = new HashSet<>();
+      while (running.get()) {
+        try {
+
+          LOG.debug(
+              "Enumerating pods with label key: {} label value: {}",
+              podLabelKey,
+              podLabelValue);
+
+          Set<String> availablePods = client
+              .pods()
+              .inNamespace(namespace)
+              .withLabel(podLabelKey, podLabelValue)
+              .list()
+              .getItems()
+              .stream()
+              .map(pod -> String.format(serviceUrlFormat, pod.getStatus().getPodIP()))
+              .collect(Collectors.toSet());
+
+          // Determine the list of service we need to add
+          Set<String> podsToAdd = availablePods
+              .stream()
+              .filter(svc -> !knownPods.contains(svc))
+              .collect(Collectors.toSet());
+
+          // Add them
+          for (String pod : podsToAdd) {
+
+            LOG.info("------------------> Adding discovery event for pod [{}]", pod);
+            listener.onServiceAdd(new SimpleDiscoveryEvent(pod));
+            knownPods.add(pod);
+          }
+
+          // Determine the list of services we need to remove
+          Set<String> podsToRemove = knownPods
+              .stream()
+              .filter(svc -> !availablePods.contains(svc))
+              .collect(Collectors.toSet());
+
+          // Remove them
+          for (String pod : podsToRemove) {
+
+            LOG.info("------------------> Removing discovery event for pod [{}]", pod);
+            listener.onServiceRemove(new SimpleDiscoveryEvent(pod));
+            knownPods.remove(pod);
+          }
+        } catch (RuntimeException e) {
+
+          LOG.warn("Failed to enumerate the pods. Will try again later.", e);
+        }
+
+        // Sleep before trying again
+        synchronized (k8sSleepMutex) {
+
+          try {
+
+            k8sSleepMutex.wait(sleepDelay);
+          } catch (InterruptedException e) {
+
+            Thread.currentThread().interrupt();
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // public API
+  @Override
+  public void registerService(String name)
+    throws IOException {}
+
+  @Override
+  public void start() {
+
+    LOG.info(
+        "Discovery agent config - maxReconnectAttempts [{}] useExponentialBackOff [{}] initialReconnectDelay [{}] maxReconnectDelay [{}]",
+        maxReconnectAttempts,
+        useExponentialBackOff,
+        initialReconnectDelay,
+        maxReconnectDelay);
+
+    taskRunner = new TaskRunnerFactory();
+    taskRunner.init();
+    running.set(true);
+    taskRunner.execute(new KubernetesPodEnumerator());
+  }
+
+  @Override
+  public void stop()
+    throws Exception {
+
+    running.set(false);
+
+    if (taskRunner != null) {
+
+      taskRunner.shutdown();
+    }
+
+    synchronized (sleepMutex) {
+
+      sleepMutex.notifyAll();
+    }
+  }
+
+  @Override
+  public void serviceFailed(DiscoveryEvent devent)
+    throws IOException {
+
+    SimpleDiscoveryEvent sevent = (SimpleDiscoveryEvent) devent;
+    if (running.get() && sevent.failed.compareAndSet(false, true)) {
+
+      listener.onServiceRemove(sevent);
+      taskRunner.execute(() -> {
+        SimpleDiscoveryEvent event = new SimpleDiscoveryEvent(sevent);
+
+        if (System.currentTimeMillis() > event.connectTime + minConnectTime) {
+
+          LOG.info(
+              "Failure occurred to long after the discovery event was generated: {}",
+              event);
+
+          event.connectFailures++;
+
+          if (maxReconnectAttempts > 0 && event.connectFailures >= maxReconnectAttempts) {
+
+            LOG.warn(
+                "Reconnect attempts exceeded {} tries.  Reconnecting has been disabled for: {}",
+                maxReconnectAttempts,
+                event);
+            return;
+          }
+
+          if (!useExponentialBackOff || event.reconnectDelay == -1) {
+
+            event.reconnectDelay = initialReconnectDelay;
+          } else {
+
+            /*
+            Exponential increment of reconnect delay.
+            */
+            event.reconnectDelay *= backOffMultiplier;
+            if (event.reconnectDelay > maxReconnectDelay) {
+
+              event.reconnectDelay = maxReconnectDelay;
             }
-        }
-    }
+          }
 
-    @Override
-    public void setDiscoveryListener(DiscoveryListener listener) {
-        this.listener = listener;
-    }
+          doReconnectDelay(event);
 
-    @Override
-    public void registerService(String name) throws IOException {
-    }
+        } else {
 
-    @Override
-    public void start() {
-        taskRunner = new TaskRunnerFactory();
-        taskRunner.init();
+          /* TODO do we really need a grace period for recent connections ? */
+          LOG.info(
+              "Failure occurred soon after the discovery event was generated: {}",
+              event);
 
-        running.set(true);
-
-        taskRunner.execute(new KubernetesPodEnumerator());
-    }
-
-    @Override
-    public void stop() throws Exception {
-        running.set(false);
-
-        if (taskRunner != null) {
-            taskRunner.shutdown();
+          event.connectFailures = 0;
+          event.reconnectDelay = initialReconnectDelay;
+          doReconnectDelay(event);
         }
 
-        synchronized (sleepMutex) {
-            sleepMutex.notifyAll();
+        if (!running.get()) {
+
+          LOG.warn("Reconnecting disabled: stopped");
+          return;
         }
+
+        LOG.info("Will retry a new connection..");
+        event.failed.set(false);
+        listener.onServiceAdd(event);
+      });
     }
+  }
 
-    @Override
-    public void serviceFailed(DiscoveryEvent devent) throws IOException {
+  // internal API
+  protected void doReconnectDelay(SimpleDiscoveryEvent event) {
 
-        final SimpleDiscoveryEvent sevent = (SimpleDiscoveryEvent)devent;
-        if (running.get() && sevent.failed.compareAndSet(false, true)) {
+    synchronized (sleepMutex) {
 
-            listener.onServiceRemove(sevent);
-            taskRunner.execute(new Runnable() {
-                @Override
-                public void run() {
-                    SimpleDiscoveryEvent event = new SimpleDiscoveryEvent(sevent);
+      try {
 
-                    // We detect a failed connection attempt because the service
-                    // fails right away.
-                    if (event.connectTime + minConnectTime > System.currentTimeMillis()) {
-                        LOG.debug("Failure occurred soon after the discovery event was generated.  It will be classified as a connection failure: {}", event);
+        if (!running.get()) {
 
-                        event.connectFailures++;
-
-                        if (maxReconnectAttempts > 0 && event.connectFailures >= maxReconnectAttempts) {
-                            LOG.warn("Reconnect attempts exceeded {} tries.  Reconnecting has been disabled for: {}", maxReconnectAttempts, event);
-                            return;
-                        }
-
-                        if (!useExponentialBackOff || event.reconnectDelay == -1) {
-                            event.reconnectDelay = initialReconnectDelay;
-                        } else {
-                            // Exponential increment of reconnect delay.
-                            event.reconnectDelay *= backOffMultiplier;
-                            if (event.reconnectDelay > maxReconnectDelay) {
-                                event.reconnectDelay = maxReconnectDelay;
-                            }
-                        }
-
-                        doReconnectDelay(event);
-
-                    } else {
-                        LOG.trace("Failure occurred to long after the discovery event was generated.  " +
-                                  "It will not be classified as a connection failure: {}", event);
-                        event.connectFailures = 0;
-                        event.reconnectDelay = initialReconnectDelay;
-
-                        doReconnectDelay(event);
-                    }
-
-                    if (!running.get()) {
-                        LOG.debug("Reconnecting disabled: stopped");
-                        return;
-                    }
-
-                    event.connectTime = System.currentTimeMillis();
-                    event.failed.set(false);
-                    listener.onServiceAdd(event);
-                }
-            }, "Simple Discovery Agent");
+          LOG.debug("Reconnecting disabled: stopped");
+          return;
         }
-    }
 
-    protected void doReconnectDelay(SimpleDiscoveryEvent event) {
-        synchronized (sleepMutex) {
-            try {
-                if (!running.get()) {
-                    LOG.debug("Reconnecting disabled: stopped");
-                    return;
-                }
+        LOG.info("Waiting {}ms before attempting to reconnect.", event.reconnectDelay);
+        sleepMutex.wait(event.reconnectDelay);
+      } catch (InterruptedException ie) {
 
-                LOG.debug("Waiting {}ms before attempting to reconnect.", event.reconnectDelay);
-                sleepMutex.wait(event.reconnectDelay);
-            } catch (InterruptedException ie) {
-                LOG.debug("Reconnecting disabled: ", ie);
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
+        LOG.debug("Reconnecting disabled: ", ie);
+        Thread.currentThread().interrupt();
+        return;
+      }
     }
+  }
 
-    public long getBackOffMultiplier() {
-        return backOffMultiplier;
-    }
+  // getters & setters
+  @Override
+  public void setDiscoveryListener(DiscoveryListener listener) {
 
-    public void setBackOffMultiplier(long backOffMultiplier) {
-        this.backOffMultiplier = backOffMultiplier;
-    }
+    this.listener = listener;
+  }
 
-    public long getInitialReconnectDelay() {
-        return initialReconnectDelay;
-    }
+  public long getBackOffMultiplier() {
+    return backOffMultiplier;
+  }
 
-    public void setInitialReconnectDelay(long initialReconnectDelay) {
-        this.initialReconnectDelay = initialReconnectDelay;
-    }
+  public void setBackOffMultiplier(long backOffMultiplier) {
+    this.backOffMultiplier = backOffMultiplier;
+  }
 
-    public int getMaxReconnectAttempts() {
-        return maxReconnectAttempts;
-    }
+  public long getInitialReconnectDelay() {
+    return initialReconnectDelay;
+  }
 
-    public void setMaxReconnectAttempts(int maxReconnectAttempts) {
-        this.maxReconnectAttempts = maxReconnectAttempts;
-    }
+  public void setInitialReconnectDelay(long initialReconnectDelay) {
+    this.initialReconnectDelay = initialReconnectDelay;
+  }
 
-    public long getMaxReconnectDelay() {
-        return maxReconnectDelay;
-    }
+  public int getMaxReconnectAttempts() {
+    return maxReconnectAttempts;
+  }
 
-    public void setMaxReconnectDelay(long maxReconnectDelay) {
-        this.maxReconnectDelay = maxReconnectDelay;
-    }
+  public void setMaxReconnectAttempts(int maxReconnectAttempts) {
+    this.maxReconnectAttempts = maxReconnectAttempts;
+  }
 
-    public long getMinConnectTime() {
-        return minConnectTime;
-    }
+  public long getMaxReconnectDelay() {
+    return maxReconnectDelay;
+  }
 
-    public void setMinConnectTime(long minConnectTime) {
-        this.minConnectTime = minConnectTime;
-    }
+  public void setMaxReconnectDelay(long maxReconnectDelay) {
+    this.maxReconnectDelay = maxReconnectDelay;
+  }
 
-    public boolean isUseExponentialBackOff() {
-        return useExponentialBackOff;
-    }
+  public long getMinConnectTime() {
+    return minConnectTime;
+  }
 
-    public void setUseExponentialBackOff(boolean useExponentialBackOff) {
-        this.useExponentialBackOff = useExponentialBackOff;
-    }
+  public void setMinConnectTime(long minConnectTime) {
+    this.minConnectTime = minConnectTime;
+  }
 
-    public String getNamespace() {
-        return namespace;
-    }
+  public boolean isUseExponentialBackOff() {
+    return useExponentialBackOff;
+  }
 
-    public void setNamespace(String namespace) {
-        this.namespace = namespace;
-    }
+  public void setUseExponentialBackOff(boolean useExponentialBackOff) {
+    this.useExponentialBackOff = useExponentialBackOff;
+  }
 
-    public String getPodLabelKey() {
-        return podLabelKey;
-    }
+  public String getNamespace() {
+    return namespace;
+  }
 
-    public void setPodLabelKey(String podLabelKey) {
-        this.podLabelKey = podLabelKey;
-    }
+  public void setNamespace(String namespace) {
+    this.namespace = namespace;
+  }
 
-    public String getPodLabelValue() {
-        return podLabelValue;
-    }
+  public String getPodLabelKey() {
+    return podLabelKey;
+  }
 
-    public void setPodLabelValue(String podLabelValue) {
-        this.podLabelValue = podLabelValue;
-    }
+  public void setPodLabelKey(String podLabelKey) {
+    this.podLabelKey = podLabelKey;
+  }
 
-    public String getServiceUrlFormat() {
-        return serviceUrlFormat;
-    }
+  public String getPodLabelValue() {
+    return podLabelValue;
+  }
 
-    public void setServiceUrlFormat(String serviceUrlFormat) {
-        this.serviceUrlFormat = serviceUrlFormat;
-    }
+  public void setPodLabelValue(String podLabelValue) {
+    this.podLabelValue = podLabelValue;
+  }
 
-    public long getSleepDelay() {
-        return sleepDelay;
-    }
+  public String getServiceUrlFormat() {
+    return serviceUrlFormat;
+  }
 
-    public void setSleepDelay(long sleepDelay) {
-        this.sleepDelay = sleepDelay;
-    }
+  public void setServiceUrlFormat(String serviceUrlFormat) {
+    this.serviceUrlFormat = serviceUrlFormat;
+  }
+
+  public long getSleepDelay() {
+    return sleepDelay;
+  }
+
+  public void setSleepDelay(long sleepDelay) {
+    this.sleepDelay = sleepDelay;
+  }
 }

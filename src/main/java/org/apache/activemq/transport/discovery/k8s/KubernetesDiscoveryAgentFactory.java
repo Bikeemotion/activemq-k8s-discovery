@@ -16,10 +16,6 @@
  */
 package org.apache.activemq.transport.discovery.k8s;
 
-import java.io.IOException;
-import java.net.URI;
-import java.util.Map;
-
 import org.apache.activemq.transport.discovery.DiscoveryAgent;
 import org.apache.activemq.transport.discovery.DiscoveryAgentFactory;
 import org.apache.activemq.util.IOExceptionSupport;
@@ -28,22 +24,29 @@ import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.net.URI;
+import java.util.Map;
+
 public class KubernetesDiscoveryAgentFactory extends DiscoveryAgentFactory {
 
-    private static final Logger LOG = LoggerFactory.getLogger(KubernetesDiscoveryAgentFactory.class);
+  private static final Logger LOG = LoggerFactory.getLogger(KubernetesDiscoveryAgentFactory.class);
 
-    protected DiscoveryAgent doCreateDiscoveryAgent(URI uri) throws IOException {
-        try {
-            Map<String, String> options = URISupport.parseParameters(uri);
-            KubernetesDiscoveryAgent rc = new KubernetesDiscoveryAgent();
-            IntrospectionSupport.setProperties(rc, options);
-            LOG.info("Succesfully created Kubernetes discovery agent from URI: {}", uri);
+  protected DiscoveryAgent doCreateDiscoveryAgent(URI uri)
+    throws IOException {
 
-            return rc;
-            
-        } catch (Throwable e) {
-            LOG.error("Could not create Kubernetes discovery agent: " + uri, e);
-            throw IOExceptionSupport.create("Could not create Kubernetes discovery agent: " + uri, e);
-        }
+    try {
+      Map<String, String> options = URISupport.parseParameters(uri);
+      KubernetesDiscoveryAgent rc = new KubernetesDiscoveryAgent();
+      IntrospectionSupport.setProperties(rc, options);
+      LOG.info("Successfully created Kubernetes discovery agent from URI: {}", uri);
+
+      return rc;
+
+    } catch (Throwable e) {
+
+      LOG.error("Could not create Kubernetes discovery agent: " + uri, e);
+      throw IOExceptionSupport.create("Could not create Kubernetes discovery agent: " + uri, e);
     }
+  }
 }
