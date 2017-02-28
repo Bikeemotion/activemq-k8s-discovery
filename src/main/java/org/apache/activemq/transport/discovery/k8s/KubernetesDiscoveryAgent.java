@@ -62,7 +62,8 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
   private String namespace = "default";
   private String podLabelKey = "app";
   private String podLabelValue = "activemq";
-  private String serviceUrlFormat = "tcp://%s:6162";
+  private int podPort = 61616;
+  private String serviceUrlFormat = "tcp://%s:%s";
   private long sleepDelay = TimeUnit.SECONDS.toMillis(30);
 
   private final KubernetesClient client = new DefaultKubernetesClient();
@@ -109,7 +110,7 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
       while (running.get()) {
         try {
 
-          LOG.debug(
+          LOG.info(
               "Enumerating pods with label key: {} label value: {}",
               podLabelKey,
               podLabelValue);
@@ -121,7 +122,7 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
               .list()
               .getItems()
               .stream()
-              .map(pod -> String.format(serviceUrlFormat, pod.getStatus().getPodIP()))
+              .map(pod -> String.format(serviceUrlFormat, pod.getStatus().getPodIP(), podPort))
               .collect(Collectors.toSet());
 
           // Determine the list of service we need to add
@@ -133,7 +134,7 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
           // Add them
           for (String pod : podsToAdd) {
 
-            LOG.info("------------------> Adding discovery event for pod [{}]", pod);
+            LOG.info("Adding discovery event for pod [{}]", pod);
             listener.onServiceAdd(new SimpleDiscoveryEvent(pod));
             knownPods.add(pod);
           }
@@ -147,7 +148,7 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
           // Remove them
           for (String pod : podsToRemove) {
 
-            LOG.info("------------------> Removing discovery event for pod [{}]", pod);
+            LOG.info("Removing discovery event for pod [{}]", pod);
             listener.onServiceRemove(new SimpleDiscoveryEvent(pod));
             knownPods.remove(pod);
           }
@@ -181,7 +182,8 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
   public void start() {
 
     LOG.info(
-        "Discovery agent config - maxReconnectAttempts [{}] useExponentialBackOff [{}] initialReconnectDelay [{}] maxReconnectDelay [{}]",
+        "Discovery agent config - podPort [{}] maxReconnectAttempts [{}] useExponentialBackOff [{}] initialReconnectDelay [{}] maxReconnectDelay [{}]",
+        podPort,
         maxReconnectAttempts,
         useExponentialBackOff,
         initialReconnectDelay,
@@ -381,6 +383,14 @@ public class KubernetesDiscoveryAgent implements DiscoveryAgent {
 
   public void setPodLabelValue(String podLabelValue) {
     this.podLabelValue = podLabelValue;
+  }
+
+  public int getPodPort() {
+    return podPort;
+  }
+
+  public void setPodPort(int podPort) {
+    this.podPort = podPort;
   }
 
   public String getServiceUrlFormat() {
